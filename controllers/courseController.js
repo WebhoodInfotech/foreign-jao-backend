@@ -1,6 +1,6 @@
 // server/controllers/courseController.js
 const mongoose = require("mongoose");
-const Course = require("../models/course.js");
+const Course = require("../models/Course");
 
 /**
  * GET /api/getCourses
