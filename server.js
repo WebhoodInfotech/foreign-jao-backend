@@ -22,23 +22,74 @@ const app = express();
 /* -------------------- Global middleware -------------------- */
 app.use(express.json({ limit: "1mb" }));
 
-// ----- FIXED CORS CONFIG -----
-const whitelist = [
-  "https://foreign-jao-public.vercel.app", // production frontend
-  "http://localhost:3000",                  // local dev frontend
+/* -------------------- Robust CORS parsing & setup -------------------- */
+/**
+ * Read process.env.CORS_ORIGIN which can be:
+ *  - empty -> we'll use sensible defaults
+ *  - a single origin -> eg "https://example.com"
+ *  - comma separated origins -> eg "https://a.com,https://b.com:3000"
+ *
+ * IMPORTANT: we'll sanitize each entry via the URL constructor and only keep the "origin"
+ * (protocol + host + port). This prevents stray path segments like
+ * "https://git.new/pathToRegexpError" from making it into arrays that confuse internals.
+ */
+function parseAndSanitizeOrigins(envVal) {
+  if (!envVal || typeof envVal !== "string") return [];
+
+  return envVal
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((candidate) => {
+      try {
+        // If candidate is a bare host like "localhost:3000", URL requires protocol; try to normalize
+        if (!candidate.startsWith("http://") && !candidate.startsWith("https://")) {
+          // assume http for parsing only
+          candidate = "http://" + candidate;
+        }
+        const u = new URL(candidate);
+        return u.origin; // e.g. "http://localhost:3000" or "https://domain.com"
+      } catch (err) {
+        console.warn(`CORS: ignoring invalid origin entry: "${candidate}" (${err?.message})`);
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+const envOrigins = parseAndSanitizeOrigins(process.env.CORS_ORIGIN);
+
+// sensible defaults if nothing provided
+const defaultWhitelist = [
+  "https://foreign-jao-public.vercel.app", // your Vercel frontend
+  "http://localhost:3000",
   "http://127.0.0.1:3000",
 ];
 
+// final whitelist: union of envOrigins and defaults (env entries first)
+const whitelist = Array.from(new Set([...envOrigins, ...defaultWhitelist]));
+
+if (envOrigins.length === 0) {
+  console.info("CORS: no CORS_ORIGIN env detected or no valid entries — using defaults:", defaultWhitelist);
+} else {
+  console.info("CORS: using whitelist (env + defaults):", whitelist);
+}
+
 const corsOptions = {
   origin: function (origin, callback) {
+    // Tools like Postman / curl / server-to-server often send no Origin header
     if (!origin) {
-      // allow requests with no origin (Postman, curl, server-to-server)
+      // allow no-origin requests (Postman/curl etc.)
       return callback(null, true);
     }
+    // allow if exact match in whitelist
     if (whitelist.indexOf(origin) !== -1) {
       return callback(null, true);
     }
-    return callback(new Error("CORS not allowed for this origin: " + origin));
+    // not allowed
+    const msg = `CORS policy: origin ${origin} is not allowed by CORS`;
+    console.warn(msg);
+    return callback(new Error(msg), false);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -47,8 +98,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// handle preflight for all routes
-app.options("*", cors(corsOptions));
+app.options("*", cors(corsOptions)); // enable preflight for all routes
 
 app.use(morgan("dev"));
 
