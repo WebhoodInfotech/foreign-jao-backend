@@ -23,16 +23,6 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 /* -------------------- Robust CORS parsing & setup -------------------- */
-/**
- * Read process.env.CORS_ORIGIN which can be:
- *  - empty -> we'll use sensible defaults
- *  - a single origin -> eg "https://example.com"
- *  - comma separated origins -> eg "https://a.com,https://b.com:3000"
- *
- * IMPORTANT: we'll sanitize each entry via the URL constructor and only keep the "origin"
- * (protocol + host + port). This prevents stray path segments like
- * "https://git.new/pathToRegexpError" from making it into arrays that confuse internals.
- */
 function parseAndSanitizeOrigins(envVal) {
   if (!envVal || typeof envVal !== "string") return [];
 
@@ -42,13 +32,11 @@ function parseAndSanitizeOrigins(envVal) {
     .filter(Boolean)
     .map((candidate) => {
       try {
-        // If candidate is a bare host like "localhost:3000", URL requires protocol; try to normalize
         if (!candidate.startsWith("http://") && !candidate.startsWith("https://")) {
-          // assume http for parsing only
           candidate = "http://" + candidate;
         }
         const u = new URL(candidate);
-        return u.origin; // e.g. "http://localhost:3000" or "https://domain.com"
+        return u.origin;
       } catch (err) {
         console.warn(`CORS: ignoring invalid origin entry: "${candidate}" (${err?.message})`);
         return null;
@@ -59,14 +47,12 @@ function parseAndSanitizeOrigins(envVal) {
 
 const envOrigins = parseAndSanitizeOrigins(process.env.CORS_ORIGIN);
 
-// sensible defaults if nothing provided
 const defaultWhitelist = [
-  "https://foreign-jao-public.vercel.app", // your Vercel frontend
+  "https://foreign-jao-public.vercel.app",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
 ];
 
-// final whitelist: union of envOrigins and defaults (env entries first)
 const whitelist = Array.from(new Set([...envOrigins, ...defaultWhitelist]));
 
 if (envOrigins.length === 0) {
@@ -77,16 +63,8 @@ if (envOrigins.length === 0) {
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // Tools like Postman / curl / server-to-server often send no Origin header
-    if (!origin) {
-      // allow no-origin requests (Postman/curl etc.)
-      return callback(null, true);
-    }
-    // allow if exact match in whitelist
-    if (whitelist.indexOf(origin) !== -1) {
-      return callback(null, true);
-    }
-    // not allowed
+    if (!origin) return callback(null, true);
+    if (whitelist.indexOf(origin) !== -1) return callback(null, true);
     const msg = `CORS policy: origin ${origin} is not allowed by CORS`;
     console.warn(msg);
     return callback(new Error(msg), false);
@@ -98,7 +76,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // enable preflight for all routes
+app.options("*", cors(corsOptions));
 
 app.use(morgan("dev"));
 
@@ -111,15 +89,42 @@ app.get("/health", (_req, res) => {
   });
 });
 
-/* -------------------- Mount routes -------------------- */
-app.use("/", authRoutes);
-app.use("/", studentRoutes);
-app.use("/", collegeRoutes);
-app.use("/", testRoutes);
-app.use("/", assetRoutes);
-app.use("/", courseRoutes);
-app.use("/", sessionRoutes);
-app.use("/", collageApplicationRoutes);
+/* -------------------- Safe mounting helper -------------------- */
+/**
+ * Use safeMount to mount routers so a bad route pattern doesn't crash boot.
+ * `mounts` expects an array of objects: { path: string, router: express.Router, name?: string }
+ */
+function safeMount(mounts) {
+  mounts.forEach(({ path, router, name }) => {
+    try {
+      // Validate path quickly: Express expects strings like "/" or "/api"
+      if (typeof path !== "string" || !path.startsWith("/")) {
+        console.warn(`Skipping mount for ${name || "<unnamed>"}: invalid mount path "${path}"`);
+        return;
+      }
+      app.use(path, router);
+      console.info(`Mounted ${name || "router"} at "${path}"`);
+    } catch (err) {
+      // Catch errors thrown by path-to-regexp or other mount-time parsing issues.
+      console.error(`Failed to mount ${name || "router"} at "${path}":`, err && err.message ? err.message : err);
+      // also print stack for debugging (short)
+      console.error(err && err.stack ? err.stack.split("\n").slice(0, 6).join("\n") : err);
+      // Do NOT throw — we want server to continue starting so you can inspect & fix.
+    }
+  });
+}
+
+/* -------------------- Mount routes safely -------------------- */
+safeMount([
+  { path: "/", router: authRoutes, name: "authRoutes" },
+  { path: "/", router: studentRoutes, name: "studentRoutes" },
+  { path: "/", router: collegeRoutes, name: "collegeRoutes" },
+  { path: "/", router: testRoutes, name: "testRoutes" },
+  { path: "/", router: assetRoutes, name: "assetRoutes" },
+  { path: "/", router: courseRoutes, name: "courseRoutes" },
+  { path: "/", router: sessionRoutes, name: "sessionRoutes" },
+  { path: "/", router: collageApplicationRoutes, name: "collageApplicationRoutes" },
+]);
 
 /* -------------------- Boot server -------------------- */
 if (require.main === module) {
